@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import struct
+import sys
 import threading
+from array import array
 from collections import namedtuple
 from collections.abc import Iterable, Iterator
 from functools import total_ordering
@@ -162,6 +165,189 @@ class CBORSimpleValue(namedtuple("CBORSimpleValue", ["value"])):
             return self.value > other.value
 
         return NotImplemented
+
+
+class CBORTypedArray:
+    """
+    Represents an RFC 8746 typed array.
+
+    The raw byte string is retained together with the wire element width and
+    byte order described by the semantic tag.
+
+    :param int tag: the RFC 8746 typed array semantic tag
+    :param bytes value: the byte string containing the array elements
+    """
+
+    __slots__ = ("tag", "value", "itemsize", "byteorder", "_struct", "_typecode")
+
+    _specs: dict[int, tuple[int, str, str]] = {
+        64: (1, "big", "B"),
+        65: (2, "big", "H"),
+        66: (4, "big", "I"),
+        67: (8, "big", "Q"),
+        68: (1, "little", "B"),
+        69: (2, "little", "H"),
+        70: (4, "little", "I"),
+        71: (8, "little", "Q"),
+        72: (1, "big", "b"),
+        73: (2, "big", "h"),
+        74: (4, "big", "i"),
+        75: (8, "big", "q"),
+        76: (1, "little", "b"),
+        77: (2, "little", "h"),
+        78: (4, "little", "i"),
+        79: (8, "little", "q"),
+        81: (4, "big", "f"),
+        82: (8, "big", "d"),
+        85: (4, "little", "f"),
+        86: (8, "little", "d"),
+    }
+
+    _array_typecodes: dict[tuple[int, str], tuple[str, ...]] = {
+        (1, "B"): ("B",),
+        (2, "H"): ("H",),
+        (4, "I"): ("I", "L"),
+        (8, "Q"): ("Q",),
+        (1, "b"): ("b",),
+        (2, "h"): ("h",),
+        (4, "i"): ("i", "l"),
+        (8, "q"): ("q",),
+        (4, "f"): ("f",),
+        (8, "d"): ("d",),
+    }
+
+    def __init__(self, tag: int, value: bytes) -> None:
+        spec = self._specs.get(tag)
+        if spec is None:
+            raise ValueError(f"unknown RFC 8746 typed array tag {tag}")
+        if not isinstance(value, bytes):
+            raise TypeError("typed array value must be a byte string")
+
+        itemsize, byteorder, fmt = spec
+        if len(value) % itemsize:
+            raise ValueError(
+                f"typed array payload length ({len(value)}) is not a multiple of the "
+                f"element width ({itemsize})"
+            )
+
+        self.tag = tag
+        self.value = value
+        self.itemsize = itemsize
+        self.byteorder = byteorder
+        self._struct = struct.Struct(("<" if byteorder == "little" else ">") + fmt)
+        self._typecode = self._find_typecode(itemsize, fmt)
+
+    @classmethod
+    def _find_typecode(cls, itemsize: int, fmt: str) -> str:
+        for typecode in cls._array_typecodes[(itemsize, fmt)]:
+            if array(typecode).itemsize == itemsize:
+                return typecode
+
+        raise TypeError(f"no standard library array type with width {itemsize}")
+
+    @classmethod
+    def from_values(cls, tag: int, values: Iterable[int | float]) -> CBORTypedArray:
+        """Build a typed array from native Python numeric values."""
+        spec = cls._specs.get(tag)
+        if spec is None:
+            raise ValueError(f"unknown RFC 8746 typed array tag {tag}")
+
+        itemsize, byteorder, fmt = spec
+        values = tuple(values)
+        byteorder_prefix = "<" if byteorder == "little" else ">"
+        data = struct.pack(f"{byteorder_prefix}{len(values)}{fmt}", *values)
+        return cls(tag, data)
+
+    @classmethod
+    def from_array(cls, tag: int, values: array) -> CBORTypedArray:
+        """Build a typed array from a standard library :class:`array.array`."""
+        spec = cls._specs.get(tag)
+        if spec is None:
+            raise ValueError(f"unknown RFC 8746 typed array tag {tag}")
+
+        itemsize, byteorder, fmt = spec
+        candidates = cls._array_typecodes[(itemsize, fmt)]
+        if values.typecode not in candidates or array(values.typecode).itemsize != itemsize:
+            raise TypeError(
+                f"array type {values.typecode!r} is not compatible with RFC 8746 tag {tag}"
+            )
+
+        wire_value = values.tobytes()
+        if byteorder != sys.byteorder:
+            wire_value = b"".join(
+                wire_value[offset : offset + itemsize][::-1]
+                for offset in range(0, len(wire_value), itemsize)
+            )
+
+        return cls(tag, wire_value)
+
+    def __len__(self) -> int:
+        return len(self.value) // self.itemsize
+
+    def __getitem__(self, index: int | slice) -> int | float | list[int | float]:
+        if isinstance(index, slice):
+            return [self[position] for position in range(len(self))[index]]
+
+        position = index + len(self) if index < 0 else index
+        if not 0 <= position < len(self):
+            raise IndexError("typed array index out of range")
+
+        return self._struct.unpack_from(self.value, position * self.itemsize)[0]
+
+    def __iter__(self) -> Iterator[int | float]:
+        return (element[0] for element in self._struct.iter_unpack(self.value))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, CBORTypedArray):
+            return (self.tag, self.value) == (other.tag, other.value)
+
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash((self.tag, self.value))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.tag}, {self.value!r})"
+
+    def to_array(self) -> array:
+        """Return the elements as a standard library :class:`array.array`."""
+        native_value = self.value
+        if self.byteorder != sys.byteorder:
+            native_value = b"".join(
+                self.value[offset : offset + self.itemsize][::-1]
+                for offset in range(0, len(self.value), self.itemsize)
+            )
+
+        result = array(self._typecode)
+        result.frombytes(native_value)
+        return result
+
+    def as_array(self) -> array:
+        """Alias for :meth:`to_array`."""
+        return self.to_array()
+
+    @property
+    def data(self) -> bytes:
+        return self.value
+
+    @property
+    def width(self) -> int:
+        return self.itemsize
+
+    @property
+    def element_width(self) -> int:
+        return self.itemsize
+
+    @property
+    def endianness(self) -> str:
+        return self.byteorder
+
+    @property
+    def endian(self) -> str:
+        return self.byteorder
+
+
+TypedArray = CBORTypedArray
 
 
 class FrozenDict(Mapping[KT, VT_co]):

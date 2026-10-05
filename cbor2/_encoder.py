@@ -18,6 +18,7 @@ from ._types import (
     CBOREncodeValueError,
     CBORSimpleValue,
     CBORTag,
+    CBORTypedArray,
     FrozenDict,
     UndefinedType,
     undefined,
@@ -573,6 +574,10 @@ class CBOREncoder:
         # Semantic tag 37
         self.encode_semantic(CBORTag(37, value.bytes))
 
+    def encode_typed_array(self, value: CBORTypedArray) -> None:
+        # RFC 8746 semantic tags 64-87
+        self.encode_semantic(CBORTag(value.tag, value.value))
+
     def encode_stringref_namespace(self, value: Any) -> None:
         # Semantic tag 256
         with self.disable_string_namespacing():
@@ -674,6 +679,7 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
     ("ipaddress", "IPv6Network"): CBOREncoder.encode_ipnetwork,
     CBORSimpleValue: CBOREncoder.encode_simple_value,
     CBORTag: CBOREncoder.encode_semantic,
+    CBORTypedArray: CBOREncoder.encode_typed_array,
     set: CBOREncoder.encode_set,
     frozenset: CBOREncoder.encode_set,
 }

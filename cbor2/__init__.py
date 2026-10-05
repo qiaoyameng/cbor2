@@ -16,7 +16,9 @@ from ._types import CBOREncodeValueError as CBOREncodeValueError
 from ._types import CBORError as CBORError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
+from ._types import CBORTypedArray as CBORTypedArray
 from ._types import FrozenDict as FrozenDict
+from ._types import TypedArray as TypedArray
 from ._types import undefined as undefined
 
 try:
@@ -59,6 +61,7 @@ else:
                     getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in default_encoders.items()
+                if hasattr(_cbor2.CBOREncoder, method.__name__)
             ]
         )
         _cbor2.canonical_encoders = OrderedDict(
@@ -76,6 +79,7 @@ else:
                     getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in canonical_encoders.items()
+                if hasattr(_cbor2.CBOREncoder, method.__name__)
             ]
         )
 

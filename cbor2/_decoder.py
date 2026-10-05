@@ -14,6 +14,7 @@ from ._types import (
     CBORDecodeValueError,
     CBORSimpleValue,
     CBORTag,
+    CBORTypedArray,
     FrozenDict,
     break_marker,
     undefined,
@@ -454,7 +455,9 @@ class CBORDecoder:
     def decode_semantic(self, subtype: int) -> Any:
         # Major tag 6
         tagnum = self._decode_length(subtype)
-        if semantic_decoder := semantic_decoders.get(tagnum):
+        if tagnum in CBORTypedArray._specs:
+            return self.decode_typed_array(tagnum)
+        elif semantic_decoder := semantic_decoders.get(tagnum):
             return semantic_decoder(self)
 
         tag = CBORTag(tagnum, None)
@@ -718,6 +721,19 @@ class CBORDecoder:
     def decode_self_describe_cbor(self) -> Any:
         # Semantic tag 55799
         return self._decode()
+
+    def decode_typed_array(self, tag: int) -> CBORTypedArray:
+        # RFC 8746 semantic tags 64-87
+        value = self._decode()
+        if not isinstance(value, bytes):
+            raise CBORDecodeValueError("typed array payload must be a byte string")
+
+        try:
+            typed_array = CBORTypedArray(tag, value)
+        except ValueError as exc:
+            raise CBORDecodeValueError(str(exc)) from exc
+
+        return self.set_shareable(typed_array)
 
     #
     # Special decoders (major tag 7)

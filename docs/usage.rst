@@ -95,6 +95,8 @@ Tag   Semantics                                Python type(s)
 35    Regular expression                       re.Pattern (result of ``re.compile(...)``)
 36    MIME message                             email.message.Message
 37    Binary UUID                              uuid.UUID
+64-79 Typed integer arrays (RFC 8746)         :class:`~cbor2.CBORTypedArray`
+81-86 Typed float arrays (RFC 8746)           :class:`~cbor2.CBORTypedArray`
 256   String reference namespace               N/A
 258   Set of unique items                      set
 260   Network address                          :class:`ipaddress.IPv4Address` (or IPv6)
