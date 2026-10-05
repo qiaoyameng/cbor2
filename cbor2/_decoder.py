@@ -9,6 +9,15 @@ from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any, TypeVar, cast, overload
 
+from ._arrays import (
+    C_CONTIGUOUS,
+    F_CONTIGUOUS,
+    NDArray,
+    TAG_SPECS,
+    TypedArray,
+    _contiguous_strides,
+    validate_shape,
+)
 from ._types import (
     CBORDecodeEOF,
     CBORDecodeValueError,
@@ -59,6 +68,8 @@ class CBORDecoder:
         "_immutable",
         "_str_errors",
         "_stringref_namespace",
+        "_max_ndim",
+        "_max_elements",
     )
 
     _fp: IO[bytes]
@@ -70,6 +81,8 @@ class CBORDecoder:
         tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
         object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
         str_errors: Literal["strict", "error", "replace"] = "strict",
+        max_ndim: int | None = 32,
+        max_elements: int | None = 1_000_000,
     ):
         """
         :param fp:
@@ -88,6 +101,13 @@ class CBORDecoder:
         :param str_errors:
             determines how to handle unicode decoding errors (see the `Error Handlers`_
             section in the standard library documentation for details)
+        :param max_ndim:
+            maximum number of dimensions permitted in an RFC 8746 multidimensional
+            array (tag 40 or 1040), or ``None`` for no limit
+        :param max_elements:
+            maximum product of dimensions permitted in an RFC 8746 multidimensional
+            array, and the maximum number of elements permitted in a typed numeric
+            array (tags 64-86), or ``None`` for no limit
 
         .. _Error Handlers: https://docs.python.org/3/library/codecs.html#error-handlers
 
@@ -96,6 +116,8 @@ class CBORDecoder:
         self.tag_hook = tag_hook
         self.object_hook = object_hook
         self.str_errors = str_errors
+        self.max_ndim = max_ndim
+        self.max_elements = max_elements
         self._share_index: int | None = None
         self._shareables: list[object] = []
         self._stringref_namespace: list[str | bytes] | None = None
@@ -160,6 +182,34 @@ class CBORDecoder:
                 f"invalid str_errors value {value!r} (must be one of 'strict', "
                 "'error', or 'replace')"
             )
+
+    @property
+    def max_ndim(self) -> int | None:
+        """Maximum number of dimensions accepted for multidimensional arrays."""
+        return self._max_ndim
+
+    @max_ndim.setter
+    def max_ndim(self, value: int | None) -> None:
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise ValueError("max_ndim must be a non-negative integer or None")
+
+        self._max_ndim = value
+
+    @property
+    def max_elements(self) -> int | None:
+        """Maximum element count accepted for RFC 8746 arrays."""
+        return self._max_elements
+
+    @max_elements.setter
+    def max_elements(self, value: int | None) -> None:
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise ValueError("max_elements must be a non-negative integer or None")
+
+        self._max_elements = value
 
     def set_shareable(self, value: T) -> T:
         """
@@ -715,6 +765,116 @@ class CBORDecoder:
 
         raise CBORDecodeValueError(f"invalid ipnetwork value {net_map!r}")
 
+    def decode_typed_array(self, tag: int) -> TypedArray:
+        # Semantic tags 64-86 (RFC 8746 typed numeric arrays)
+        _typecode, _wire_fmt, itemsize, _is_float, _endian = TAG_SPECS[tag]
+        initial = self.read(1)[0]
+        major = initial >> 5
+        subtype = initial & 31
+        if major != 2:
+            raise CBORDecodeValueError(
+                f"typed array tag {tag} must wrap a byte string"
+            )
+        if subtype == 31:
+            raise CBORDecodeValueError(
+                f"typed array tag {tag} must have a definite-length byte string"
+            )
+
+        length = self._decode_length(subtype)
+        if length > sys.maxsize:
+            raise CBORDecodeValueError(f"invalid length for typed array 0x{length:x}")
+        if length % itemsize:
+            raise CBORDecodeValueError(
+                f"typed array payload length {length} is not a multiple of the "
+                f"{itemsize}-byte element size for tag {tag}"
+            )
+
+        n_elements = length // itemsize
+        if self._max_elements is not None and n_elements > self._max_elements:
+            raise CBORDecodeValueError(
+                f"typed array has {n_elements} elements, exceeding the maximum of "
+                f"{self._max_elements}"
+            )
+
+        raw = self.read(length)
+        return self.set_shareable(TypedArray._from_bytes(tag, raw))
+
+    def _read_array_header(self) -> int | None:
+        """Read an array head (major type 4) and return its length, or None."""
+        initial = self.read(1)[0]
+        if initial >> 5 != 4:
+            raise CBORDecodeValueError(
+                "expected a multidimensional array payload [dimensions, data]"
+            )
+
+        return self._decode_length(initial & 31, allow_indefinite=True)
+
+    def decode_multidim_array(self, tag: int) -> NDArray:
+        # Semantic tag 40 (column-major) or 1040 (row-major), RFC 8746
+        outer_length = self._read_array_header()
+        if outer_length is None:
+            raise CBORDecodeValueError(
+                "multidimensional array wrapper must be a definite-length array"
+            )
+        if outer_length != 2:
+            raise CBORDecodeValueError(
+                "multidimensional array payload must be a 2-element array "
+                "[dimensions, data]"
+            )
+
+        dim_length = self._read_array_header()
+        if dim_length is None:
+            raise CBORDecodeValueError(
+                "multidimensional array dimensions must be a definite-length array"
+            )
+        if self._max_ndim is not None and dim_length > self._max_ndim:
+            raise CBORDecodeValueError(
+                f"multidimensional array has {dim_length} dimensions, exceeding the "
+                f"maximum of {self._max_ndim}"
+            )
+
+        dimensions = [self._decode() for _ in range(dim_length)]
+
+        # Validate the shape and enforce the element cap before touching the
+        # potentially huge backing payload.  Validating first means a stream
+        # declaring an enormous product (e.g. 2**60 x 2**60) is rejected before
+        # the data array is decoded, so no giant buffer is ever requested.
+        shape = validate_shape(
+            dimensions,
+            max_ndim=self._max_ndim,
+            max_elements=self._max_elements,
+        )
+        product = 1
+        for dim in shape:
+            product *= dim
+
+        data = self._decode(unshared=True)
+        if isinstance(data, TypedArray):
+            n_elements = len(data)
+        elif (
+            isinstance(data, list)
+            and data is not None
+            and all(not isinstance(item, (list, tuple, dict, bytes, str)) for item in data)
+        ):
+            n_elements = len(data)
+        else:
+            raise CBORDecodeValueError(
+                "multidimensional array data must be a flat array or a typed "
+                "numeric array"
+            )
+
+        if n_elements != product:
+            raise CBORDecodeValueError(
+                f"shape product {product} does not match element count {n_elements}"
+            )
+
+        order = F_CONTIGUOUS if tag == 40 else C_CONTIGUOUS
+        return self.set_shareable(
+            NDArray._create(
+                shape, data, order, 0, _contiguous_strides(shape, order)
+            )
+        )
+
     def decode_self_describe_cbor(self) -> Any:
         # Semantic tag 55799
         return self._decode()
@@ -761,6 +921,10 @@ special_decoders: dict[int, Callable[[CBORDecoder], Any]] = {
 }
 
 semantic_decoders: dict[int, Callable[[CBORDecoder], Any]] = {
+    **{tag: (lambda decoder, tag=tag: CBORDecoder.decode_typed_array(decoder, tag))
+       for tag in TAG_SPECS},
+    40: lambda decoder: CBORDecoder.decode_multidim_array(decoder, 40),
+    1040: lambda decoder: CBORDecoder.decode_multidim_array(decoder, 1040),
     0: CBORDecoder.decode_datetime_string,
     1: CBORDecoder.decode_epoch_datetime,
     2: CBORDecoder.decode_positive_bignum,
@@ -789,6 +953,8 @@ def loads(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    max_ndim: int | None = 32,
+    max_elements: int | None = 1_000_000,
 ) -> Any:
     """
     Deserialize an object from a bytestring.
@@ -815,7 +981,12 @@ def loads(
     """
     with BytesIO(s) as fp:
         return CBORDecoder(
-            fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+            fp,
+            tag_hook=tag_hook,
+            object_hook=object_hook,
+            str_errors=str_errors,
+            max_ndim=max_ndim,
+            max_elements=max_elements,
         ).decode()
 
 
@@ -824,6 +995,8 @@ def load(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    max_ndim: int | None = 32,
+    max_elements: int | None = 1_000_000,
 ) -> Any:
     """
     Deserialize an object from an open file.
@@ -849,5 +1022,10 @@ def load(
 
     """
     return CBORDecoder(
-        fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+        fp,
+        tag_hook=tag_hook,
+        object_hook=object_hook,
+        str_errors=str_errors,
+        max_ndim=max_ndim,
+        max_elements=max_elements,
     ).decode()

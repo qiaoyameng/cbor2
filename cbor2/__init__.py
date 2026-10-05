@@ -1,5 +1,9 @@
 from typing import Any
 
+from ._arrays import C_CONTIGUOUS as C_CONTIGUOUS
+from ._arrays import F_CONTIGUOUS as F_CONTIGUOUS
+from ._arrays import NDArray as NDArray
+from ._arrays import TypedArray as TypedArray
 from ._decoder import CBORDecoder as CBORDecoder
 from ._decoder import load as load
 from ._decoder import loads as loads

@@ -5,6 +5,17 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**Unreleased**
+
+- Added support for RFC 8746 typed numeric arrays (CBOR tags 64-86) decoded as
+  the new :class:`cbor2.TypedArray` type
+- Added support for RFC 8746 multidimensional arrays (CBOR tags 40 and 1040)
+  decoded as the new :class:`cbor2.NDArray` type, preserving dimensions and
+  layout without expanding into nested lists, with coordinate indexing and
+  zero-copy slice views
+- Added the ``max_ndim`` and ``max_elements`` decoder limits to guard against
+  pathological dimension products
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

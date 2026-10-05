@@ -4,6 +4,7 @@ import math
 import re
 import struct
 import sys
+from array import array
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Generator, Mapping, Sequence, Set
 from contextlib import contextmanager
@@ -13,6 +14,13 @@ from io import BytesIO
 from sys import modules
 from typing import IO, TYPE_CHECKING, Any, cast
 
+from ._arrays import (
+    ARRAY_CODE_TAGS,
+    F_CONTIGUOUS,
+    NDArray,
+    TypedArray,
+    _contiguous_strides,
+)
 from ._types import (
     CBOREncodeTypeError,
     CBOREncodeValueError,
@@ -599,6 +607,48 @@ class CBOREncoder:
     # Special encoders (major tag 7)
     #
 
+    def encode_typed_array(self, value: TypedArray) -> None:
+        self.encode_length(6, value.tag)
+        raw = value.to_wire_bytes()
+        self.encode_length(2, len(raw))
+        self._fp_write(raw)
+
+    def encode_native_array(self, value: array[Any]) -> None:
+        try:
+            tag = ARRAY_CODE_TAGS[value.typecode]
+        except KeyError:
+            raise CBOREncodeValueError(
+                f"cannot encode array.array with typecode {value.typecode!r}"
+            )
+
+        self.encode_typed_array(TypedArray(tag, value))
+
+    def encode_multidim_array(self, value: NDArray) -> None:
+        tag = 40 if value.order == F_CONTIGUOUS else 1040
+        self.encode_length(6, tag)
+        self.encode_length(4, 2)
+        self.encode(list(value.shape))
+        backing = value.data
+        contiguous_root = (
+            value.offset == 0
+            and backing is not None
+            and value.strides
+            == _contiguous_strides(value.shape, value.order)
+        )
+        if contiguous_root and isinstance(backing, TypedArray):
+            # Emit the typed array directly (tag + bytes) without materializing
+            # a nested or expanded representation.
+            self.encode(backing)
+        elif (
+            contiguous_root
+            and isinstance(backing, array)
+            and backing.typecode in ARRAY_CODE_TAGS
+        ):
+            self.encode_native_array(backing)
+        else:
+            # Views or non-contiguous layouts are flattened in storage order.
+            self.encode(list(value._elements_layout_order()))
+
     def encode_simple_value(self, value: CBORSimpleValue) -> None:
         if value.value < 24:
             self._fp_write(struct.pack(">B", 0xE0 | value.value))
@@ -647,6 +697,9 @@ class CBOREncoder:
 
 
 default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None]] = {
+    TypedArray: CBOREncoder.encode_typed_array,
+    NDArray: CBOREncoder.encode_multidim_array,
+    array: CBOREncoder.encode_native_array,
     bytes: CBOREncoder.encode_bytestring,
     bytearray: CBOREncoder.encode_bytearray,
     str: CBOREncoder.encode_string,

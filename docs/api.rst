@@ -21,6 +21,14 @@ Types
 
 .. autoclass:: cbor2.CBORSimpleValue
 .. autoclass:: cbor2.CBORTag
+.. autoclass:: cbor2.TypedArray
+.. autoclass:: cbor2.NDArray
+    :members:
+.. data:: cbor2.C_CONTIGUOUS
+    Row-major (C order) layout for :class:`~cbor2.NDArray` (CBOR tag 1040).
+.. data:: cbor2.F_CONTIGUOUS
+    Column-major (Fortran order) layout for :class:`~cbor2.NDArray`
+    (CBOR tag 40).
 .. data:: cbor2.undefined
     A singleton representing the CBOR "undefined" value.
 
