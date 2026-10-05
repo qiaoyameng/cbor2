@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import struct
+import sys
+from array import array
 import threading
 from collections import namedtuple
 from collections.abc import Iterable, Iterator
@@ -162,6 +165,150 @@ class CBORSimpleValue(namedtuple("CBORSimpleValue", ["value"])):
             return self.value > other.value
 
         return NotImplemented
+
+
+class TypedArray:
+    """
+    Represents an RFC 8746 typed array.
+
+    The wire payload bytes, element width, signedness and wire byte order are
+    retained without depending on the host machine's byte order.
+    """
+
+    __slots__ = ("_tag", "_data", "_width", "_typecode", "_byteorder", "_struct")
+
+    _specs = {
+        64: ("B", 1, "B", "little"),
+        65: ("H", 2, "H", "little"),
+        66: ("I", 4, "I", "big"),
+        67: ("Q", 8, "Q", "big"),
+        68: ("b", 1, "b", "little"),
+        69: ("h", 2, "h", "little"),
+        70: ("i", 4, "i", "big"),
+        71: ("q", 8, "q", "big"),
+        72: ("H", 2, "H", "big"),
+        73: ("I", 4, "I", "little"),
+        74: ("Q", 8, "Q", "little"),
+        75: ("h", 2, "h", "big"),
+        76: ("i", 4, "i", "little"),
+        77: ("q", 8, "q", "little"),
+        80: ("f", 4, "f", "little"),
+        81: ("f", 4, "f", "big"),
+        82: ("d", 8, "d", "big"),
+        83: ("d", 8, "d", "little"),
+    }
+
+    def __init__(self, tag: int, data: bytes) -> None:
+        try:
+            typecode, width, struct_format, byteorder = self._specs[tag]
+        except KeyError:
+            raise ValueError(f"unknown typed array tag {tag}") from None
+
+        if not isinstance(data, bytes):
+            raise TypeError("typed array data must be bytes")
+        if len(data) % width:
+            raise ValueError("typed array data length is not a multiple of the element width")
+
+        self._tag = tag
+        self._data = data
+        self._typecode = typecode
+        self._width = width
+        self._byteorder = byteorder
+        self._struct = struct.Struct(self._struct_prefix(byteorder) + struct_format)
+
+    @classmethod
+    def from_array(cls, tag: int, values: array) -> TypedArray:
+        """Create a typed array from a standard library :class:`array.array`."""
+        try:
+            typecode, width, _, _ = cls._specs[tag]
+        except KeyError:
+            raise ValueError(f"unknown typed array tag {tag}") from None
+
+        if values.typecode != typecode or values.itemsize != width:
+            raise ValueError("array typecode does not match the typed array tag")
+
+        data = bytes(values)
+        target_byteorder = cls._specs[tag][3]
+        native_byteorder = "little" if sys.byteorder == "little" else "big"
+        if width > 1 and target_byteorder != native_byteorder:
+            swapped = array(values.typecode, data)
+            swapped.byteswap()
+            data = bytes(swapped)
+
+        return cls(tag, data)
+
+    @property
+    def tag(self) -> int:
+        return self._tag
+
+    @property
+    def data(self) -> bytes:
+        return self._data
+
+    @property
+    def value(self) -> bytes:
+        return self._data
+
+    @property
+    def typecode(self) -> str:
+        return self._typecode
+
+    @property
+    def itemsize(self) -> int:
+        return self._width
+
+    @property
+    def byteorder(self) -> str:
+        return self._byteorder
+
+    def __len__(self) -> int:
+        return len(self._data) // self._width
+
+    def __getitem__(self, index: int) -> int | float:
+        length = len(self)
+        if index < 0:
+            index += length
+        if not 0 <= index < length:
+            raise IndexError("typed array index out of range")
+
+        offset = index * self._width
+        return self._struct.unpack_from(self._data, offset)[0]
+
+    def __iter__(self) -> Iterator[int | float]:
+        for index in range(len(self)):
+            yield self[index]
+
+    def to_array(self) -> array:
+        """Convert the values to a standard library :class:`array.array`."""
+        values = array(self._typecode)
+        values.frombytes(self._data)
+        native_byteorder = "little" if sys.byteorder == "little" else "big"
+        if self._width > 1 and self._byteorder != native_byteorder:
+            values.byteswap()
+
+        return values
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, TypedArray):
+            return self._tag == other._tag and self._data == other._data
+
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        values = list(self)
+        if len(values) > 6:
+            values_text = f"[{', '.join(repr(value) for value in values[:6])}, ...]"
+        else:
+            values_text = repr(values)
+
+        return f"TypedArray({self._tag}, {values_text})"
+
+    def __hash__(self) -> int:
+        return hash((self._tag, self._data))
+
+    @staticmethod
+    def _struct_prefix(byteorder: str) -> str:
+        return "<" if byteorder == "little" else ">"
 
 
 class FrozenDict(Mapping[KT, VT_co]):

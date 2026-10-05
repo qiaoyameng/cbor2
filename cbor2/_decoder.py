@@ -15,6 +15,7 @@ from ._types import (
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
+    TypedArray,
     break_marker,
     undefined,
 )
@@ -782,6 +783,28 @@ semantic_decoders: dict[int, Callable[[CBORDecoder], Any]] = {
     1004: CBORDecoder.decode_date_string,
     55799: CBORDecoder.decode_self_describe_cbor,
 }
+
+
+def _typed_array_decoder(tag: int) -> Callable[[CBORDecoder], TypedArray]:
+    def decode_typed_array(self: CBORDecoder) -> TypedArray:
+        payload = self._decode(unshared=True)
+        if not isinstance(payload, bytes):
+            raise CBORDecodeValueError("invalid typed array value")
+
+        try:
+            value = TypedArray(tag, payload)
+        except (TypeError, ValueError) as exc:
+            raise CBORDecodeValueError("invalid typed array value") from exc
+
+        return self.set_shareable(value)
+
+    return decode_typed_array
+
+
+for _tag in TypedArray._specs:
+    semantic_decoders[_tag] = _typed_array_decoder(_tag)
+
+del _tag
 
 
 def loads(

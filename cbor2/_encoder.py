@@ -19,6 +19,7 @@ from ._types import (
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
+    TypedArray,
     UndefinedType,
     undefined,
 )
@@ -496,6 +497,9 @@ class CBOREncoder:
         self.string_referencing = old_string_referencing
         self._string_references = old_string_references
 
+    def encode_typed_array(self, value: TypedArray) -> None:
+        self.encode_semantic(CBORTag(value.tag, value.data))
+
     #
     # Semantic decoders (major tag 6)
     #
@@ -674,6 +678,7 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
     ("ipaddress", "IPv6Network"): CBOREncoder.encode_ipnetwork,
     CBORSimpleValue: CBOREncoder.encode_simple_value,
     CBORTag: CBOREncoder.encode_semantic,
+    TypedArray: CBOREncoder.encode_typed_array,
     set: CBOREncoder.encode_set,
     frozenset: CBOREncoder.encode_set,
 }

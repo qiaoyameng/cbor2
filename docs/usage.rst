@@ -99,8 +99,14 @@ Tag   Semantics                                Python type(s)
 258   Set of unique items                      set
 260   Network address                          :class:`ipaddress.IPv4Address` (or IPv6)
 261   Network prefix                           :class:`ipaddress.IPv4Network` (or IPv6)
+64-77 RFC 8746 typed integer arrays          :class:`cbor2.TypedArray`
+80-83 RFC 8746 typed float arrays            :class:`cbor2.TypedArray`
 55799 Self-Described CBOR                      object
 ===== ======================================== ====================================================
+
+RFC 8746 typed arrays decode to :class:`TypedArray`, which retains the wire byte order and
+element width. Read elements by index, call :meth:`TypedArray.to_array` for a standard library
+:class:`array.array`, or encode the object directly to preserve its wire representation.
 
 Arbitary tags can be represented with the :class:`CBORTag` class.
 

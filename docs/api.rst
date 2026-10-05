@@ -21,6 +21,7 @@ Types
 
 .. autoclass:: cbor2.CBORSimpleValue
 .. autoclass:: cbor2.CBORTag
+.. autoclass:: cbor2.TypedArray
 .. data:: cbor2.undefined
     A singleton representing the CBOR "undefined" value.
 

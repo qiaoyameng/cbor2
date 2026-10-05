@@ -17,6 +17,7 @@ from ._types import CBORError as CBORError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
 from ._types import FrozenDict as FrozenDict
+from ._types import TypedArray as TypedArray
 from ._types import undefined as undefined
 
 try:
@@ -42,7 +43,7 @@ else:
         import _cbor2
 
         from ._encoder import canonical_encoders, default_encoders
-        from ._types import CBORSimpleValue, CBORTag, undefined
+        from ._types import CBORSimpleValue, CBORTag, TypedArray, undefined
 
         _cbor2.default_encoders = OrderedDict(
             [
@@ -59,6 +60,7 @@ else:
                     getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in default_encoders.items()
+                if type_ is not TypedArray
             ]
         )
         _cbor2.canonical_encoders = OrderedDict(
@@ -76,6 +78,7 @@ else:
                     getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in canonical_encoders.items()
+                if type_ is not TypedArray
             ]
         )
 
