@@ -5,6 +5,13 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added support for `RFC 8746 <https://www.rfc-editor.org/rfc/rfc8746.html>`_ typed arrays
+  (tags 64-87, decoded as ``array.array``) and multi-dimensional arrays (tags 40 and 1040,
+  decoded as ``cbor2.MultiDimArray`` which supports row- and column-major layouts,
+  coordinate indexing and read-only slicing views)
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

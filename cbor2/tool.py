@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import base64
 import decimal
 import fractions
@@ -17,7 +18,15 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from . import CBORDecoder, CBORSimpleValue, CBORTag, FrozenDict, load, undefined
+from . import (
+    CBORDecoder,
+    CBORSimpleValue,
+    CBORTag,
+    FrozenDict,
+    MultiDimArray,
+    load,
+    undefined,
+)
 
 if TYPE_CHECKING:
     from typing import Literal, TypeAlias
@@ -27,9 +36,11 @@ JSONValue: TypeAlias = "str | float | bool | None | list[JSONValue] | dict[str, 
 
 default_encoders: dict[type, Callable[[Any], Any]] = {
     bytes: lambda x: x.decode(encoding="utf-8", errors="backslashreplace"),
+    array.array: list,
     decimal.Decimal: str,
     FrozenDict: lambda x: str(dict(x)),
     CBORSimpleValue: lambda x: f"cbor_simple:{x.value:d}",
+    MultiDimArray: lambda x: x.tolist(),
     type(undefined): lambda x: "cbor:undef",
     datetime: lambda x: x.isoformat(),
     fractions.Fraction: str,

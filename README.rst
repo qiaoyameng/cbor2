@@ -29,6 +29,8 @@ Features
 
 * Simple api like ``json`` or ``pickle`` modules.
 * Support many `CBOR tags`_ with `stdlib objects`_.
+* `RFC 8746`_ typed arrays and multi-dimensional arrays (row- and column-major), without
+  requiring NumPy
 * Generic tag decoding.
 * `Shared value`_ references including cyclic references.
 * `String references`_ compact encoding with repeated strings replaced with indices.
@@ -39,6 +41,7 @@ Features
 * Thorough test suite.
 
 .. _CBOR tags: https://www.iana.org/assignments/cbor-tags/cbor-tags.xhtml
+.. _RFC 8746: https://www.rfc-editor.org/rfc/rfc8746.html
 .. _stdlib objects: https://cbor2.readthedocs.io/en/latest/usage.html#tag-support
 .. _Shared value: http://cbor.schmorp.de/value-sharing
 .. _String references: http://cbor.schmorp.de/stringref

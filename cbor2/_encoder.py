@@ -4,6 +4,7 @@ import math
 import re
 import struct
 import sys
+from array import array
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Generator, Mapping, Sequence, Set
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from ._types import (
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
+    MultiDimArray,
     UndefinedType,
     undefined,
 )
@@ -34,6 +36,49 @@ if TYPE_CHECKING:
         from collections.abc import Buffer
     else:
         from typing_extensions import Buffer
+
+
+def _build_typecode_tags() -> dict[str, int]:
+    """
+    Map native array typecodes to RFC 8746 typed array tag numbers, using the
+    endianness of the running platform (so no byte swapping is ever needed).
+    """
+    big_endian = {
+        ("u", 1): 64,
+        ("u", 2): 65,
+        ("u", 4): 66,
+        ("u", 8): 67,
+        ("i", 1): 72,
+        ("i", 2): 73,
+        ("i", 4): 74,
+        ("i", 8): 75,
+        ("f", 4): 81,
+        ("f", 8): 82,
+    }
+    little_endian = {
+        ("u", 1): 64,
+        ("u", 2): 69,
+        ("u", 4): 70,
+        ("u", 8): 71,
+        ("i", 1): 72,
+        ("i", 2): 77,
+        ("i", 4): 78,
+        ("i", 8): 79,
+        ("f", 4): 86,
+        ("f", 8): 87,
+    }
+    table = little_endian if sys.byteorder == "little" else big_endian
+    tags: dict[str, int] = {}
+    for typecode in "BHILQbhilqfd":
+        kind = "f" if typecode in "fd" else "u" if typecode.isupper() else "i"
+        tag = table.get((kind, array(typecode).itemsize))
+        if tag is not None:
+            tags[typecode] = tag
+
+    return tags
+
+
+_array_typecode_tags = _build_typecode_tags()
 
 
 def shareable_encoder(
@@ -306,7 +351,17 @@ class CBOREncoder:
             the object to encode
         """
         obj_type = obj.__class__
-        encoder = self._encoders.get(obj_type) or self._find_encoder(obj_type) or self._default
+        encoder = self._encoders.get(obj_type) or self._find_encoder(obj_type)
+        if encoder is None:
+            # These types are handled here rather than in default_encoders so
+            # that the C backend's encoder table initialization is unaffected
+            if isinstance(obj, MultiDimArray):
+                encoder = CBOREncoder.encode_multidim_array
+            elif isinstance(obj, array):
+                encoder = CBOREncoder.encode_typed_array
+            else:
+                encoder = self._default
+
         if not encoder:
             raise CBOREncodeTypeError(f"cannot serialize type {obj_type.__name__}")
 
@@ -594,6 +649,27 @@ class CBOREncoder:
     def encode_ipnetwork(self, value: IPv4Network | IPv6Network) -> None:
         # Semantic tag 261
         self.encode_semantic(CBORTag(261, {value.network_address.packed: value.prefixlen}))
+
+    def encode_typed_array(self, value: array[Any]) -> None:
+        # Semantic tags 64-87 (RFC 8746 typed arrays)
+        try:
+            tag = _array_typecode_tags[value.typecode]
+        except KeyError:
+            raise CBOREncodeTypeError(
+                f"cannot serialize array with typecode {value.typecode!r}"
+            ) from None
+
+        self.encode_length(6, tag)
+        self.encode_bytestring(value.tobytes())
+
+    @container_encoder
+    def encode_multidim_array(self, value: MultiDimArray) -> None:
+        # Semantic tags 40 (row-major) and 1040 (column-major)
+        # Views materialize their (logical) flat elements; top-level arrays
+        # encode their underlying sequence directly
+        self.encode_semantic(
+            CBORTag(value.layout.value, [list(value.dimensions), value.flat_data()])
+        )
 
     #
     # Special encoders (major tag 7)

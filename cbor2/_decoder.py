@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import struct
 import sys
+from array import array
 from codecs import getincrementaldecoder
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -10,11 +11,15 @@ from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any, TypeVar, cast, overload
 
 from ._types import (
+    DEFAULT_MAX_MULTIDIM_DIMENSIONS,
+    DEFAULT_MAX_MULTIDIM_ELEMENTS,
     CBORDecodeEOF,
     CBORDecodeValueError,
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
+    MultiDimArray,
+    MultiDimArrayLayout,
     break_marker,
     undefined,
 )
@@ -33,6 +38,45 @@ timestamp_re = re.compile(
     r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)" r"(?:\.(\d{1,6})\d*)?(?:Z|([+-])(\d\d):(\d\d))$"
 )
 incremental_utf8_decoder = getincrementaldecoder("utf-8")
+
+# RFC 8746 typed array tags: tag number -> (kind, element size, little endian)
+# kind is one of "u" (unsigned int), "i" (signed int) or "f" (float); "e" is a
+# 16-bit float which has no native array typecode and is widened to float32
+_typed_array_tags: dict[int, tuple[str, int, bool]] = {
+    64: ("u", 1, False),
+    65: ("u", 2, False),
+    66: ("u", 4, False),
+    67: ("u", 8, False),
+    68: ("u", 1, False),  # uint8, clamped (identical to tag 64 when decoding)
+    69: ("u", 2, True),
+    70: ("u", 4, True),
+    71: ("u", 8, True),
+    72: ("i", 1, False),
+    73: ("i", 2, False),
+    74: ("i", 4, False),
+    75: ("i", 8, False),
+    77: ("i", 2, True),
+    78: ("i", 4, True),
+    79: ("i", 8, True),
+    80: ("e", 2, False),
+    81: ("f", 4, False),
+    82: ("f", 8, False),
+    85: ("e", 2, True),
+    86: ("f", 4, True),
+    87: ("f", 8, True),
+}
+
+
+def _array_typecode(kind: str, size: int) -> str:
+    """Find a native array typecode for the given element kind and size."""
+    candidates = {"u": "BHILQ", "i": "bhilq", "f": "fd"}
+    for typecode in candidates[kind]:
+        if array(typecode).itemsize == size:
+            return typecode
+
+    raise CBORDecodeValueError(
+        f"no native array type available for {size}-byte {kind} elements"
+    )
 
 
 class CBORDecoder:
@@ -59,6 +103,8 @@ class CBORDecoder:
         "_immutable",
         "_str_errors",
         "_stringref_namespace",
+        "_max_multidim_dimensions",
+        "_max_multidim_elements",
     )
 
     _fp: IO[bytes]
@@ -70,6 +116,8 @@ class CBORDecoder:
         tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
         object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
         str_errors: Literal["strict", "error", "replace"] = "strict",
+        max_multidim_dimensions: int = DEFAULT_MAX_MULTIDIM_DIMENSIONS,
+        max_multidim_elements: int = DEFAULT_MAX_MULTIDIM_ELEMENTS,
     ):
         """
         :param fp:
@@ -88,10 +136,21 @@ class CBORDecoder:
         :param str_errors:
             determines how to handle unicode decoding errors (see the `Error Handlers`_
             section in the standard library documentation for details)
+        :param max_multidim_dimensions:
+            maximum number of dimensions accepted when decoding RFC 8746
+            multi-dimensional arrays (tags 40 and 1040)
+        :param max_multidim_elements:
+            maximum number of elements (the product of the dimensions) accepted
+            when decoding RFC 8746 multi-dimensional arrays (tags 40 and 1040)
 
         .. _Error Handlers: https://docs.python.org/3/library/codecs.html#error-handlers
 
         """
+        if max_multidim_dimensions < 0:
+            raise ValueError("max_multidim_dimensions must be non-negative")
+        if max_multidim_elements < 0:
+            raise ValueError("max_multidim_elements must be non-negative")
+
         self.fp = fp
         self.tag_hook = tag_hook
         self.object_hook = object_hook
@@ -100,6 +159,8 @@ class CBORDecoder:
         self._shareables: list[object] = []
         self._stringref_namespace: list[str | bytes] | None = None
         self._immutable = False
+        self._max_multidim_dimensions = max_multidim_dimensions
+        self._max_multidim_elements = max_multidim_elements
 
     @property
     def immutable(self) -> bool:
@@ -671,6 +732,66 @@ class CBORDecoder:
 
         return self.set_shareable(value)
 
+    def decode_typed_array(self, tagnum: int) -> array[Any]:
+        # Semantic tags 64-87 (RFC 8746 typed arrays)
+        payload = self._decode()
+        if not isinstance(payload, (bytes, bytearray)):
+            raise CBORDecodeValueError(
+                f"invalid typed array payload for tag {tagnum}: {payload!r}"
+            )
+
+        kind, size, little_endian = _typed_array_tags[tagnum]
+        if len(payload) % size:
+            raise CBORDecodeValueError(
+                f"typed array payload of {len(payload)} bytes is not a multiple "
+                f"of the element size ({size})"
+            )
+
+        if kind == "e":
+            # 16-bit floats have no native array typecode; widen to float32
+            # (every float16 value is exactly representable as a float32)
+            byteorder = "<" if little_endian else ">"
+            values = struct.unpack(f"{byteorder}{len(payload) // 2}e", payload)
+            result = array("f", values)
+        else:
+            result = array(_array_typecode(kind, size))
+            result.frombytes(bytes(payload))
+            if little_endian != (sys.byteorder == "little"):
+                result.byteswap()
+
+        return self.set_shareable(result)
+
+    def decode_multidim_array(self, layout: MultiDimArrayLayout) -> MultiDimArray:
+        # Semantic tags 40 (row-major) and 1040 (column-major)
+        content = self._decode()
+        if not isinstance(content, (list, tuple)) or len(content) != 2:
+            raise CBORDecodeValueError(
+                "invalid multi-dimensional array payload (expected a 2-element "
+                "array of dimensions and elements)"
+            )
+
+        dimensions, data = content
+        if not isinstance(dimensions, (list, tuple)):
+            raise CBORDecodeValueError(
+                f"multi-dimensional array dimensions must be an array, not "
+                f"{dimensions!r}"
+            )
+
+        try:
+            value = MultiDimArray(
+                data,
+                dimensions,
+                layout,
+                max_dimensions=self._max_multidim_dimensions,
+                max_elements=self._max_multidim_elements,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CBORDecodeValueError(
+                f"invalid multi-dimensional array: {exc}"
+            ) from exc
+
+        return self.set_shareable(value)
+
     def decode_stringref_namespace(self) -> Any:
         # Semantic tag 256
         old_namespace = self._stringref_namespace
@@ -774,14 +895,23 @@ semantic_decoders: dict[int, Callable[[CBORDecoder], Any]] = {
     35: CBORDecoder.decode_regexp,
     36: CBORDecoder.decode_mime,
     37: CBORDecoder.decode_uuid,
+    40: lambda self: self.decode_multidim_array(MultiDimArrayLayout.ROW_MAJOR),
     100: CBORDecoder.decode_epoch_date,
     256: CBORDecoder.decode_stringref_namespace,
     258: CBORDecoder.decode_set,
     260: CBORDecoder.decode_ipaddress,
     261: CBORDecoder.decode_ipnetwork,
     1004: CBORDecoder.decode_date_string,
+    1040: lambda self: self.decode_multidim_array(MultiDimArrayLayout.COLUMN_MAJOR),
     55799: CBORDecoder.decode_self_describe_cbor,
 }
+
+for _tagnum in _typed_array_tags:
+    semantic_decoders[_tagnum] = (
+        lambda self, _tagnum=_tagnum: self.decode_typed_array(_tagnum)
+    )
+
+del _tagnum
 
 
 def loads(
@@ -789,6 +919,8 @@ def loads(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    max_multidim_dimensions: int = DEFAULT_MAX_MULTIDIM_DIMENSIONS,
+    max_multidim_elements: int = DEFAULT_MAX_MULTIDIM_ELEMENTS,
 ) -> Any:
     """
     Deserialize an object from a bytestring.
@@ -807,6 +939,12 @@ def loads(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param max_multidim_dimensions:
+        maximum number of dimensions accepted when decoding RFC 8746
+        multi-dimensional arrays (tags 40 and 1040)
+    :param max_multidim_elements:
+        maximum number of elements (the product of the dimensions) accepted
+        when decoding RFC 8746 multi-dimensional arrays (tags 40 and 1040)
     :return:
         the deserialized object
 
@@ -815,7 +953,12 @@ def loads(
     """
     with BytesIO(s) as fp:
         return CBORDecoder(
-            fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+            fp,
+            tag_hook=tag_hook,
+            object_hook=object_hook,
+            str_errors=str_errors,
+            max_multidim_dimensions=max_multidim_dimensions,
+            max_multidim_elements=max_multidim_elements,
         ).decode()
 
 
@@ -824,6 +967,8 @@ def load(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    max_multidim_dimensions: int = DEFAULT_MAX_MULTIDIM_DIMENSIONS,
+    max_multidim_elements: int = DEFAULT_MAX_MULTIDIM_ELEMENTS,
 ) -> Any:
     """
     Deserialize an object from an open file.
@@ -842,6 +987,12 @@ def load(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param max_multidim_dimensions:
+        maximum number of dimensions accepted when decoding RFC 8746
+        multi-dimensional arrays (tags 40 and 1040)
+    :param max_multidim_elements:
+        maximum number of elements (the product of the dimensions) accepted
+        when decoding RFC 8746 multi-dimensional arrays (tags 40 and 1040)
     :return:
         the deserialized object
 
@@ -849,5 +1000,10 @@ def load(
 
     """
     return CBORDecoder(
-        fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+        fp,
+        tag_hook=tag_hook,
+        object_hook=object_hook,
+        str_errors=str_errors,
+        max_multidim_dimensions=max_multidim_dimensions,
+        max_multidim_elements=max_multidim_elements,
     ).decode()

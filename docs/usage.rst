@@ -95,14 +95,43 @@ Tag   Semantics                                Python type(s)
 35    Regular expression                       re.Pattern (result of ``re.compile(...)``)
 36    MIME message                             email.message.Message
 37    Binary UUID                              uuid.UUID
+40    Multi-dimensional array, row-major       :class:`MultiDimArray`
+64-87 Typed arrays                           :class:`array.array`
 256   String reference namespace               N/A
 258   Set of unique items                      set
 260   Network address                          :class:`ipaddress.IPv4Address` (or IPv6)
 261   Network prefix                           :class:`ipaddress.IPv4Network` (or IPv6)
+1040  Multi-dimensional array, column-major    :class:`MultiDimArray`
 55799 Self-Described CBOR                      object
 ===== ======================================== ====================================================
 
 Arbitary tags can be represented with the :class:`CBORTag` class.
+
+Multi-dimensional arrays
+------------------------
+
+`RFC 8746`_ multi-dimensional arrays (tags 40 and 1040) are decoded into
+:class:`MultiDimArray` objects which retain the dimensions, the layout
+(row-major or column-major) and the flat underlying data. The data is *not*
+expanded into nested lists on decoding; elements are accessed with coordinate
+tuples instead::
+
+    from cbor2 import loads
+
+    arr = loads(bytes.fromhex("d8288282020386010203040506"))  # 2x3, row-major
+    assert arr.dimensions == (2, 3)
+    assert arr[1, 2] == 6
+    row = arr[1]  # a read-only view sharing the underlying data
+    assert row.tolist() == [4, 5, 6]
+
+The underlying data may be a plain array or an RFC 8746 typed array (decoded
+into :class:`array.array`). Slicing is deliberately restricted to full slices
+(``:``) that keep the view contiguous in memory, so views never copy the
+underlying data. The number of dimensions and the total number of elements
+accepted on decoding can be limited with the ``max_multidim_dimensions`` and
+``max_multidim_elements`` arguments to :func:`load`/:func:`loads`.
+
+.. _RFC 8746: https://www.rfc-editor.org/rfc/rfc8746.html
 
 If you want to write a file that is detected as CBOR by the Unix ``file`` utility, wrap your data in
 a :class:`CBORTag` object like so::
