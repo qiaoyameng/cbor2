@@ -6,6 +6,7 @@ from ._types import CBORDecodeValueError as CBORDecodeValueError
 from ._types import CBOREncodeError as CBOREncodeError
 from ._types import CBOREncodeTypeError as CBOREncodeTypeError
 from ._types import CBOREncodeValueError as CBOREncodeValueError
+from ._types import CBORFloat as CBORFloat
 from ._types import CBORError as CBORError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag

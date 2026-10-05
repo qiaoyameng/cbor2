@@ -10,6 +10,7 @@ from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any, TypeVar, cast, overload
 
 from ._types import (
+    CBORFloat,
     CBORDecodeEOF,
     CBORDecodeValueError,
     CBORSimpleValue,
@@ -59,6 +60,7 @@ class CBORDecoder:
         "_immutable",
         "_str_errors",
         "_stringref_namespace",
+        "_float_fidelity",
     )
 
     _fp: IO[bytes]
@@ -70,6 +72,7 @@ class CBORDecoder:
         tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
         object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
         str_errors: Literal["strict", "error", "replace"] = "strict",
+        float_fidelity: bool = False,
     ):
         """
         :param fp:
@@ -89,6 +92,14 @@ class CBORDecoder:
             determines how to handle unicode decoding errors (see the `Error Handlers`_
             section in the standard library documentation for details)
 
+        :param bool float_fidelity:
+            when ``True``, floating point values are decoded as
+            :class:`~cbor2.CBORFloat` wrappers that remember the original float
+            width (half/single/double) and raw bit pattern (including signed
+            zeroes and NaN payloads), enabling bit-exact round trips. When
+            ``False`` (the default) they are decoded as ordinary :class:`float`
+            values, exactly as before
+
         .. _Error Handlers: https://docs.python.org/3/library/codecs.html#error-handlers
 
         """
@@ -96,6 +107,7 @@ class CBORDecoder:
         self.tag_hook = tag_hook
         self.object_hook = object_hook
         self.str_errors = str_errors
+        self.float_fidelity = float_fidelity
         self._share_index: int | None = None
         self._shareables: list[object] = []
         self._stringref_namespace: list[str | bytes] | None = None
@@ -160,6 +172,14 @@ class CBORDecoder:
                 f"invalid str_errors value {value!r} (must be one of 'strict', "
                 "'error', or 'replace')"
             )
+
+    @property
+    def float_fidelity(self) -> bool:
+        return self._float_fidelity
+
+    @float_fidelity.setter
+    def float_fidelity(self, value: bool) -> None:
+        self._float_fidelity = bool(value)
 
     def set_shareable(self, value: T) -> T:
         """
@@ -728,13 +748,31 @@ class CBORDecoder:
         return CBORSimpleValue(self.read(1)[0])
 
     def decode_float16(self) -> float:
-        return self.set_shareable(cast(float, struct.unpack(">e", self.read(2))[0]))
+        data = self.read(2)
+        if self._float_fidelity:
+            value = CBORFloat.from_bits(struct.unpack(">H", data)[0], 16)
+        else:
+            value = cast(float, struct.unpack(">e", data)[0])
+
+        return self.set_shareable(value)
 
     def decode_float32(self) -> float:
-        return self.set_shareable(cast(float, struct.unpack(">f", self.read(4))[0]))
+        data = self.read(4)
+        if self._float_fidelity:
+            value = CBORFloat.from_bits(struct.unpack(">I", data)[0], 32)
+        else:
+            value = cast(float, struct.unpack(">f", data)[0])
+
+        return self.set_shareable(value)
 
     def decode_float64(self) -> float:
-        return self.set_shareable(cast(float, struct.unpack(">d", self.read(8))[0]))
+        data = self.read(8)
+        if self._float_fidelity:
+            value = CBORFloat.from_bits(struct.unpack(">Q", data)[0], 64)
+        else:
+            value = cast(float, struct.unpack(">d", data)[0])
+
+        return self.set_shareable(value)
 
 
 major_decoders: dict[int, Callable[[CBORDecoder, int], Any]] = {
@@ -789,6 +827,7 @@ def loads(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    float_fidelity: bool = False,
 ) -> Any:
     """
     Deserialize an object from a bytestring.
@@ -807,6 +846,10 @@ def loads(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param bool float_fidelity:
+        when ``True``, return floating point values as
+        :class:`~cbor2.CBORFloat` wrappers preserving their original width and
+        bit pattern for bit-exact round trips; defaults to ``False``
     :return:
         the deserialized object
 
@@ -815,7 +858,11 @@ def loads(
     """
     with BytesIO(s) as fp:
         return CBORDecoder(
-            fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+            fp,
+            tag_hook=tag_hook,
+            object_hook=object_hook,
+            str_errors=str_errors,
+            float_fidelity=float_fidelity,
         ).decode()
 
 
@@ -824,6 +871,7 @@ def load(
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
     object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    float_fidelity: bool = False,
 ) -> Any:
     """
     Deserialize an object from an open file.
@@ -842,6 +890,10 @@ def load(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param bool float_fidelity:
+        when ``True``, return floating point values as
+        :class:`~cbor2.CBORFloat` wrappers preserving their original width and
+        bit pattern for bit-exact round trips; defaults to ``False``
     :return:
         the deserialized object
 
@@ -849,5 +901,9 @@ def load(
 
     """
     return CBORDecoder(
-        fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+        fp,
+        tag_hook=tag_hook,
+        object_hook=object_hook,
+        str_errors=str_errors,
+        float_fidelity=float_fidelity,
     ).decode()

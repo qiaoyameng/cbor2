@@ -151,3 +151,49 @@ An example where the data could be used as a dict key::
         return Pair(*tag.value)
 
 The ``object_hook`` can check for the immutable flag in the same way.
+
+Float fidelity
+--------------
+
+Normally, CBOR half (``f9``), single (``fa``) and double (``fb``) precision
+floats are all decoded into ordinary Python :class:`float` objects (which are
+themselves double precision). That loses two pieces of information that matter
+for byte-level audits: the *width* the number was originally encoded in, and
+the exact *bit pattern* (including signed zeroes and the payload bits of
+NaN values).
+
+Pass ``float_fidelity=True`` to :func:`loads`, :func:`load` or
+:class:`CBORDecoder` to receive :class:`CBORFloat` wrappers instead::
+
+    from binascii import unhexlify
+    from cbor2 import dumps, loads
+
+    value = loads(unhexlify("fa7fc00001"), float_fidelity=True)
+    value          # CBORFloat(nan, width=32, bits=0x7fc00001)
+    value.width    # 32
+    value.bits     # 2143289345
+    dumps(value)   # b'\xfa\x7f\xc0\x00\x01'  -- byte-exact round trip
+
+A :class:`CBORFloat` is a :class:`float` subclass, so it behaves exactly like a
+normal float in arithmetic and numeric comparisons; three encodings of the same
+numeric value still compare equal even though their :attr:`~CBORFloat.width`
+and :attr:`~CBORFloat.bits` differ.
+
+When re-encoded, a wrapper reuses its original width and bit string by default.
+Building one with the constructor re-validates that the value is expressible in
+that width (a value that would be rounded or overflow raises
+:class:`ValueError`)::
+
+    from cbor2 import CBORFloat
+
+    CBORFloat(1.5, 16)        # OK: 1.5 is exactly representable in half precision
+    CBORFloat(1.1, 32)        # ValueError: not exactly representable
+    CBORFloat.from_bits(0x7E01, 16)  # half-precision NaN with payload 1
+
+Canonical mode and fidelity conflict for wrapped values: canonical encoding
+would otherwise shorten the width and normalize every NaN. The explicit rule is
+that **fidelity wins** -- a :class:`CBORFloat` is always emitted at its original
+width with its original bit pattern, even with ``canonical=True``. Plain,
+unwrapped floats remain subject to canonical minimization exactly as before.
+When ``float_fidelity`` is left at its default of ``False`` the decoding and
+numeric-comparison behavior is completely unchanged.

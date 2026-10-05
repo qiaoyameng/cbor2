@@ -14,6 +14,7 @@ from sys import modules
 from typing import IO, TYPE_CHECKING, Any, cast
 
 from ._types import (
+    CBORFloat,
     CBOREncodeTypeError,
     CBOREncodeValueError,
     CBORSimpleValue,
@@ -636,6 +637,46 @@ class CBOREncoder:
 
             self._fp_write(encoded)
 
+    def encode_cbor_float(self, value: CBORFloat) -> None:
+        # A fidelity-tracked float keeps the exact width and bit string it was
+        # decoded (or explicitly built) with. Re-validate that the numeric
+        # value is still expressible in that width before emitting the bytes,
+        # so a wrapper whose value was replaced cannot silently lie about its
+        # representation.
+        float_format = {16: ">e", 32: ">f", 64: ">d"}[value.width]
+        bits_format = {16: ">H", 32: ">I", 64: ">Q"}[value.width]
+        initial_byte = {16: 0xF9, 32: 0xFA, 64: 0xFB}[value.width]
+        try:
+            packed = struct.pack(float_format, float(value))
+        except OverflowError:
+            raise CBOREncodeValueError(
+                f"value {float(value)!r} cannot be represented as a "
+                f"{value.width}-bit float"
+            ) from None
+
+        number = float(value)
+        if math.isnan(number):
+            # NaNs do not have a single canonical bit pattern (they may carry
+            # arbitrary payloads), so struct.pack() cannot be used to verify
+            # them. The value is still valid as long as the sign is preserved;
+            # the original payload bits are emitted verbatim.
+            stored_sign = value.bits >> (value.width - 1)
+            number_sign = 1 if math.copysign(1.0, number) < 0 else 0
+            if stored_sign != number_sign:
+                raise CBOREncodeValueError(
+                    "CBORFloat NaN sign no longer matches its stored bit pattern"
+                )
+        else:
+            current_bits = struct.unpack(bits_format, packed)[0]
+            if current_bits != value.bits:
+                raise CBOREncodeValueError(
+                    f"CBORFloat value {number!r} is no longer represented by its "
+                    f"stored {value.width}-bit bits 0x{value.bits:x} "
+                    f"(now 0x{current_bits:x})"
+                )
+
+        self._fp_write(bytes([initial_byte]) + struct.pack(bits_format, value.bits))
+
     def encode_boolean(self, value: bool) -> None:
         self._fp_write(b"\xf5" if value else b"\xf4")
 
@@ -652,6 +693,7 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
     str: CBOREncoder.encode_string,
     int: CBOREncoder.encode_int,
     float: CBOREncoder.encode_float,
+    CBORFloat: CBOREncoder.encode_cbor_float,
     ("decimal", "Decimal"): CBOREncoder.encode_decimal,
     bool: CBOREncoder.encode_boolean,
     type(None): CBOREncoder.encode_none,
@@ -681,6 +723,10 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
 
 canonical_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None]] = {
     float: CBOREncoder.encode_minimal_float,
+    # Explicit float fidelity takes precedence over canonical minimization:
+    # a CBORFloat is always re-emitted at its original width with its original
+    # bit pattern (NaN payloads included), never normalized or shortened.
+    CBORFloat: CBOREncoder.encode_cbor_float,
     dict: CBOREncoder.encode_canonical_map,
     defaultdict: CBOREncoder.encode_canonical_map,
     OrderedDict: CBOREncoder.encode_canonical_map,

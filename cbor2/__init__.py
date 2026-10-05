@@ -13,6 +13,7 @@ from ._types import CBORDecodeValueError as CBORDecodeValueError
 from ._types import CBOREncodeError as CBOREncodeError
 from ._types import CBOREncodeTypeError as CBOREncodeTypeError
 from ._types import CBOREncodeValueError as CBOREncodeValueError
+from ._types import CBORFloat as CBORFloat
 from ._types import CBORError as CBORError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
@@ -42,7 +43,7 @@ else:
         import _cbor2
 
         from ._encoder import canonical_encoders, default_encoders
-        from ._types import CBORSimpleValue, CBORTag, undefined
+        from ._types import CBORFloat, CBORSimpleValue, CBORTag, undefined
 
         _cbor2.default_encoders = OrderedDict(
             [
@@ -55,8 +56,13 @@ else:
                         else type(_cbor2.undefined)
                         if type_ is type(undefined)
                         else type_
+                        if type_ is not CBORFloat
+                        # CBORFloat is a Python-only fidelity wrapper, so keep
+                        # its Python type (and Python encoder) rather than
+                        # collapsing it onto the C float type
+                        else CBORFloat
                     ),
-                    getattr(_cbor2.CBOREncoder, method.__name__),
+                    method if type_ is CBORFloat else getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in default_encoders.items()
             ]
@@ -72,8 +78,13 @@ else:
                         else type(_cbor2.undefined)
                         if type_ is type(undefined)
                         else type_
+                        if type_ is not CBORFloat
+                        # CBORFloat is a Python-only fidelity wrapper, so keep
+                        # its Python type (and Python encoder) rather than
+                        # collapsing it onto the C float type
+                        else CBORFloat
                     ),
-                    getattr(_cbor2.CBOREncoder, method.__name__),
+                    method if type_ is CBORFloat else getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in canonical_encoders.items()
             ]

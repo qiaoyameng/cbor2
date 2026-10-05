@@ -5,6 +5,15 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added an optional ``float_fidelity`` decoding mode that returns
+  :class:`CBORFloat` wrappers preserving the original float width (half, single
+  or double) and raw bit pattern, including signed zeroes and NaN payloads, for
+  byte-exact round trips. Wrapped values reuse their original width and bits when
+  re-encoded; fidelity takes precedence over canonical minimization for wrapped
+  values while plain floats are unaffected
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

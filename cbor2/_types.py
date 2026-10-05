@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import struct
 import threading
 from collections import namedtuple
 from collections.abc import Iterable, Iterator
@@ -162,6 +164,95 @@ class CBORSimpleValue(namedtuple("CBORSimpleValue", ["value"])):
             return self.value > other.value
 
         return NotImplemented
+
+
+class CBORFloat(float):
+    """
+    A float that preserves the exact CBOR floating point representation it was
+    decoded from (or was explicitly constructed with).
+
+    The wrapper behaves numerically like an ordinary :class:`float` (so value
+    comparisons, arithmetic and ``math`` functions work unchanged) but carries
+    two extra pieces of information needed for bit-exact binary audits:
+
+    * :attr:`width` -- the original float width (``16``, ``32`` or ``64``)
+    * :attr:`bits` -- the raw, unsigned big-endian bit pattern of the original
+      encoding (including the sign bit and any NaN payload)
+
+    Re-encoding a ``CBORFloat`` reuses its original width and bit string, and
+    re-checks that the numeric value is still represented by those bits.
+    Constructing a ``CBORFloat`` validates that the value can actually be
+    expressed in the given width; a value that would overflow or change when
+    rounded raises :class:`ValueError`.
+
+    Use :meth:`from_bits` to construct a wrapper from a raw bit pattern, which
+    is the only way to preserve non-canonical NaN payloads and signed zeroes.
+
+    :param value: the numeric value
+    :param int width: the target float width (16, 32 or 64)
+    :raises ValueError: if the value cannot be represented exactly in *width*
+    """
+
+    __slots__ = ("width", "bits")
+
+    def __new__(cls, value: Any, width: int = 64) -> CBORFloat:
+        if width not in (16, 32, 64):
+            raise ValueError("float width must be one of 16, 32 or 64")
+
+        number = float(value)
+        float_format = {16: ">e", 32: ">f", 64: ">d"}[width]
+        bits_format = {16: ">H", 32: ">I", 64: ">Q"}[width]
+        try:
+            packed = struct.pack(float_format, number)
+        except OverflowError:
+            raise ValueError(
+                f"value {number!r} cannot be represented as a {width}-bit float"
+            ) from None
+
+        roundtrip = struct.unpack(float_format, packed)[0]
+        if roundtrip != number and not (
+            math.isnan(roundtrip) and math.isnan(number)
+        ):
+            raise ValueError(
+                f"value {number!r} cannot be represented exactly as a "
+                f"{width}-bit float"
+            )
+
+        bits = struct.unpack(bits_format, packed)[0]
+        self = super().__new__(cls, number)
+        self.width = width
+        self.bits = bits
+        return self
+
+    @classmethod
+    def from_bits(cls, bits: int, width: int) -> CBORFloat:
+        """
+        Create a ``CBORFloat`` from the raw unsigned bit pattern *bits* as
+        originally encoded in a *width*-bit (16, 32 or 64) CBOR float.
+
+        This preserves information that :class:`float` itself cannot carry,
+        such as the original width, signed zero and arbitrary NaN payloads.
+
+        :param int bits: the raw, big-endian unsigned bit pattern
+        :param int width: the float width (16, 32 or 64)
+        :raises ValueError: if *width* is invalid or *bits* is out of range
+        """
+        if width not in (16, 32, 64):
+            raise ValueError("float width must be one of 16, 32 or 64")
+        if not isinstance(bits, int) or bits < 0 or bits >= 1 << width:
+            raise ValueError(f"bits 0x{bits:x} do not fit in a {width}-bit float")
+
+        bits_format = {16: ">H", 32: ">I", 64: ">Q"}[width]
+        float_format = {16: ">e", 32: ">f", 64: ">d"}[width]
+        packed = struct.pack(bits_format, bits)
+        value = struct.unpack(float_format, packed)[0]
+        self = super().__new__(cls, value)
+        self.width = width
+        self.bits = bits
+        return self
+
+    def __repr__(self) -> str:
+        return f"CBORFloat({float(self)!r}, width={self.width}, bits=0x{self.bits:x})"
 
 
 class FrozenDict(Mapping[KT, VT_co]):
