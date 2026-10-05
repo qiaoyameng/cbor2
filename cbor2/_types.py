@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import struct
 import threading
 from collections import namedtuple
 from collections.abc import Iterable, Iterator
@@ -39,6 +41,127 @@ class CBORDecodeValueError(CBORDecodeError, ValueError):
 
 class CBORDecodeEOF(CBORDecodeError, EOFError):
     """Raised when decoding unexpectedly reaches EOF."""
+
+
+_float_formats = {16: ">e", 32: ">f", 64: ">d"}
+
+
+class FloatValue:
+    """
+    A float wrapper that preserves the CBOR wire representation of a
+    floating-point value: its width (16, 32 or 64 bits) and its exact bit
+    pattern (including NaN payloads and the sign of zero).
+
+    Instances of this type are produced by :class:`.CBORDecoder` when the
+    ``float_fidelity`` option is enabled, but they can also be constructed
+    directly from a plain :class:`float` (the value must be exactly
+    representable at the given width).
+
+    When re-encoded, the original wire form (width and bit pattern) is
+    reused by default, even when canonical encoding is requested: fidelity
+    takes precedence over canonicalization for wrapped values, so NaN
+    payloads are never normalized away. If :attr:`value` is numerically
+    modified, the new value is re-validated against the stored width and
+    re-encoded at that same width; encoding fails with
+    :exc:`ValueError` if the new value cannot be expressed at that width.
+
+    :param value: the numeric value (a plain :class:`float`)
+    :param width: the float width in bits (16, 32 or 64; default 64)
+    """
+
+    __slots__ = ("_value", "_width", "_bits", "_modified")
+
+    def __init__(self, value: float, width: int = 64) -> None:
+        if width not in _float_formats:
+            raise ValueError(f"invalid float width {width!r} (must be 16, 32 or 64)")
+
+        self._width = width
+        self._bits = self._pack(value, width)
+        self._value = float(value)
+        self._modified = False
+
+    @staticmethod
+    def _pack(value: float, width: int) -> bytes:
+        fmt = _float_formats[width]
+        try:
+            packed = struct.pack(fmt, value)
+        except OverflowError:
+            raise ValueError(f"{value!r} is out of range for a {width}-bit float") from None
+
+        if not math.isnan(value) and struct.unpack(fmt, packed)[0] != value:
+            raise ValueError(f"{value!r} cannot be represented exactly as a {width}-bit float")
+
+        return packed
+
+    @classmethod
+    def from_bits(cls, bits: bytes, width: int) -> FloatValue:
+        """
+        Construct a :class:`FloatValue` from a raw big-endian bit pattern.
+
+        :param bits: the raw payload bytes (2, 4 or 8 bytes)
+        :param width: the float width in bits (16, 32 or 64)
+        """
+        if width not in _float_formats:
+            raise ValueError(f"invalid float width {width!r} (must be 16, 32 or 64)")
+        elif len(bits) != width // 8:
+            raise ValueError(
+                f"a {width}-bit float requires {width // 8} bytes, got {len(bits)}"
+            )
+
+        self = cls.__new__(cls)
+        self._width = width
+        self._bits = bytes(bits)
+        self._value = struct.unpack(_float_formats[width], self._bits)[0]
+        self._modified = False
+        return self
+
+    @property
+    def value(self) -> float:
+        """The numeric value, as a plain :class:`float`."""
+        return self._value
+
+    @value.setter
+    def value(self, new_value: float) -> None:
+        self._value = float(new_value)
+        self._modified = True
+
+    @property
+    def width(self) -> int:
+        """The float width in bits (16, 32 or 64)."""
+        return self._width
+
+    @property
+    def bits(self) -> bytes:
+        """
+        The raw big-endian bit pattern of the value at its stored width.
+
+        If the value has not been modified since decoding/construction, this
+        is the exact bit pattern read from the wire (NaN payloads and the
+        sign of zero included). If the value was modified, the new value is
+        packed at the stored width, raising :exc:`ValueError` if it cannot
+        be expressed at that width.
+        """
+        if self._modified:
+            return self._pack(self._value, self._width)
+
+        return self._bits
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, FloatValue):
+            return (self._width, self._value) == (other._width, other._value)
+        elif isinstance(other, (float, int)):
+            return self._value == other
+
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __float__(self) -> float:
+        return self._value
+
+    def __repr__(self) -> str:
+        return f"FloatValue({self._value!r}, width={self._width}, bits={self.bits!r})"
 
 
 @total_ordering

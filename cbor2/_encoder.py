@@ -18,6 +18,7 @@ from ._types import (
     CBOREncodeValueError,
     CBORSimpleValue,
     CBORTag,
+    FloatValue,
     FrozenDict,
     UndefinedType,
     undefined,
@@ -161,7 +162,10 @@ class CBOREncoder:
         :param canonical:
             when ``True``, use "canonical" CBOR representation; this typically involves
             sorting maps, sets, etc. into a pre-determined order ensuring that
-            serializations are comparable without decoding
+            serializations are comparable without decoding. Note that
+            :class:`.FloatValue` instances are exempt from canonicalization: they are
+            always encoded with their preserved width and bit pattern (fidelity takes
+            precedence over canonical form for wrapped floats)
         :param date_as_datetime:
             set to ``True`` to serialize date objects as datetimes (CBOR tag 0), which
             was the default behavior in previous releases (cbor2 <= 4.1.2).
@@ -636,6 +640,20 @@ class CBOREncoder:
 
             self._fp_write(encoded)
 
+    def encode_float_value(self, value: FloatValue) -> None:
+        # Fidelity takes precedence over canonicalization: an unmodified
+        # FloatValue is always re-emitted with its original width and bit
+        # pattern (NaN payloads are never normalized), even when canonical
+        # encoding has been requested. A numerically modified value is
+        # re-validated against, and re-encoded at, its stored width.
+        head = {16: 0xF9, 32: 0xFA, 64: 0xFB}[value.width]
+        try:
+            payload = value.bits
+        except ValueError as exc:
+            raise CBOREncodeValueError(str(exc)) from exc
+
+        self._fp_write(struct.pack(">B", head) + payload)
+
     def encode_boolean(self, value: bool) -> None:
         self._fp_write(b"\xf5" if value else b"\xf4")
 
@@ -652,6 +670,7 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
     str: CBOREncoder.encode_string,
     int: CBOREncoder.encode_int,
     float: CBOREncoder.encode_float,
+    FloatValue: CBOREncoder.encode_float_value,
     ("decimal", "Decimal"): CBOREncoder.encode_decimal,
     bool: CBOREncoder.encode_boolean,
     type(None): CBOREncoder.encode_none,

@@ -5,6 +5,14 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added the ``float_fidelity`` option to ``cbor2.load()``, ``cbor2.loads()`` and
+  ``cbor2.CBORDecoder`` (pure Python implementation only). When enabled, floats decode
+  as the new ``cbor2.FloatValue`` type, which preserves the original wire width
+  (16/32/64 bits) and bit pattern (including NaN payloads and the sign of zero) and
+  re-encodes byte-exactly by default, even in canonical mode
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

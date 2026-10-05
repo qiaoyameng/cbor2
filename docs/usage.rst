@@ -74,6 +74,36 @@ instead encodes a reference to the nth sufficiently long string already encoded.
 .. warning:: Support for string referencing is rare in other CBOR implementations, so think carefully
     whether you want to enable it.
 
+Float fidelity
+--------------
+
+By default, floats decode to plain :class:`float` objects, which loses two pieces of
+information: the original wire width (half/single/double precision) and the exact bit
+pattern (NaN payloads and the sign of zero are preserved by the latter only in the
+double-precision case). For applications that need this information — for example
+binary auditing tools that compare encodings byte for byte — pass
+``float_fidelity=True`` to :func:`load`/:func:`loads`. Floats then decode as
+:class:`FloatValue` wrappers that retain the original width and bit pattern::
+
+    from cbor2 import loads, dumps
+
+    value = loads(bytes.fromhex('fa7fc00001'), float_fidelity=True)
+    assert value.width == 32                      # encoded as single precision
+    assert value.bits == bytes.fromhex('7fc00001')  # NaN payload intact
+    assert dumps(value) == bytes.fromhex('fa7fc00001')  # byte-exact round trip
+
+A :class:`FloatValue` can also be constructed from a plain :class:`float`, in which
+case the value must be exactly representable at the given width. When a wrapped value
+is re-encoded, its original wire form is reused by default — even when
+``canonical=True`` is passed to :func:`dump`/:func:`dumps`, because fidelity takes
+precedence over canonicalization for wrapped values (NaN payloads are never
+normalized). If the value is numerically modified via its ``value`` attribute, the new
+value is re-validated against the stored width and encoding fails with
+:exc:`CBOREncodeValueError` if it cannot be expressed at that width.
+
+.. note:: The float fidelity option is only available in the pure Python
+    implementation; the C extension does not implement it.
+
 Tag support
 -----------
 

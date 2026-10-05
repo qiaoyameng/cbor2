@@ -16,6 +16,7 @@ from ._types import CBOREncodeValueError as CBOREncodeValueError
 from ._types import CBORError as CBORError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
+from ._types import FloatValue as FloatValue
 from ._types import FrozenDict as FrozenDict
 from ._types import undefined as undefined
 
@@ -59,6 +60,9 @@ else:
                     getattr(_cbor2.CBOREncoder, method.__name__),
                 )
                 for type_, method in default_encoders.items()
+                # The C encoder does not implement every encoder method of the
+                # pure Python encoder (e.g. encode_float_value); skip those
+                if hasattr(_cbor2.CBOREncoder, method.__name__)
             ]
         )
         _cbor2.canonical_encoders = OrderedDict(
